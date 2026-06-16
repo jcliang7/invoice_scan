@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>發票 QR 掃描器</title>
+<style>
+  :root {
+    --green: #1B4332;
+    --green2: #2D6A4F;
+    --paper: #FFF8E7;
+    --paper2: #F0E6C8;
+    --border: #D4C5A0;
+    --accent: #E85D04;
+    --muted: #6B7280;
+    --ink: #1a1a1a;
+    --success: #059669;
+    --error: #DC2626;
+    --white: #fff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Noto Sans TC', system-ui, sans-serif; background: #F5F0E8; color: var(--ink); min-height: 100vh; }
+
+  header {
+    background: var(--green); color: white; padding: 14px 18px;
+    display: flex; align-items: center; gap: 10px;
+    position: sticky; top: 0; z-index: 100;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.25);
+  }
+  header .logo { font-size: 20px; font-weight: 700; }
+  header .logo em { color: #8BC34A; font-style: normal; }
+  header .badge {
+    margin-left: auto; background: var(--accent); color: white;
+    font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 20px;
+    display: none;
+  }
+
+  main { max-width: 860px; margin: 0 auto; padding: 18px 14px 100px; }
+
+  /* Scanner card */
+  .scanner-card {
+    background: var(--white); border-radius: 16px;
+    border: 1.5px solid var(--border);
+    overflow: hidden; margin-bottom: 18px;
+  }
+  .scanner-header {
+    background: var(--green); color: white;
+    padding: 12px 18px; display: flex; align-items: center; gap: 10px;
+  }
+  .scanner-header h2 { font-size: 15px; font-weight: 700; }
+  .scanner-body { padding: 16px; }
+
+  #videoWrap {
+    position: relative; background: #000; border-radius: 10px;
+    overflow: hidden; margin-bottom: 14px;
+    aspect-ratio: 4/3; max-height: 340px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #video { width: 100%; height: 100%; object-fit: cover; display: none; }
+  #canvas { display: none; }
+  .cam-placeholder {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 10px; color: #888; font-size: 14px;
+    width: 100%; height: 100%; min-height: 200px;
+  }
+  .cam-placeholder .icon { font-size: 48px; }
+
+  /* Scan overlay */
+  .scan-overlay {
+    position: absolute; inset: 0; pointer-events: none;
+    display: none;
+  }
+  .scan-overlay.active { display: block; }
+  .scan-frame {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    width: min(240px, 75%); aspect-ratio: 1;
+    border: 2.5px solid rgba(139, 195, 74, 0.8);
+    border-radius: 8px;
+  }
+  .scan-frame::before, .scan-frame::after,
+  .scan-frame .c1::before, .scan-frame .c1::after {
+    content: ''; position: absolute; width: 20px; height: 20px; border-color: #8BC34A; border-style: solid;
+  }
+  .scan-frame::before { top: -3px; left: -3px; border-width: 4px 0 0 4px; border-radius: 6px 0 0 0; }
+  .scan-frame::after  { top: -3px; right: -3px; border-width: 4px 4px 0 0; border-radius: 0 6px 0 0; }
+  .scan-frame .c1::before { bottom: -3px; left: -3px; border-width: 0 0 4px 4px; border-radius: 0 0 0 6px; }
+  .scan-frame .c1::after  { bottom: -3px; right: -3px; border-width: 0 4px 4px 0; border-radius: 0 0 6px 0; }
+  .scan-line {
+    position: absolute; left: 4px; right: 4px; height: 2px;
+    background: linear-gradient(90deg, transparent, #8BC34A, transparent);
+    top: 10%; animation: scanMove 2s linear infinite;
+  }
+  @keyframes scanMove { 0%{top:5%} 50%{top:90%} 100%{top:5%} }
+
+  .status-bar {
+    text-align: center; font-size: 13px; padding: 8px 12px;
+    border-radius: 8px; margin-bottom: 10px; font-weight: 500;
+    background: #F0F4F8; color: var(--muted); display: none;
+  }
+  .status-bar.scanning { background: #DBEAFE; color: #1E40AF; display: block; }
+  .status-bar.success  { background: #D1FAE5; color: #065F46; display: block; }
+  .status-bar.error    { background: #FEE2E2; color: #991B1B; display: block; }
+  .status-bar.info     { background: #FEF3C7; color: #92400E; display: block; }
+
+  .cam-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 10px 16px; border-radius: 8px; font-size: 13px;
+    font-weight: 600; cursor: pointer; border: none; font-family: inherit;
+    transition: all 0.15s;
+  }
+  .btn-green  { background: var(--green); color: white; }
+  .btn-green:hover { background: var(--green2); }
+  .btn-outline { background: white; color: var(--green); border: 2px solid var(--green); }
+  .btn-outline:hover { background: var(--paper); }
+  .btn-accent { background: var(--accent); color: white; }
+  .btn-accent:hover { opacity: 0.9; }
+  .btn-sm { padding: 6px 11px; font-size: 12px; }
+  .btn-ghost { background: #F3F4F6; color: #374151; }
+  .btn-ghost:hover { background: #E5E7EB; }
+  .btn-danger { background: #FEE2E2; color: var(--error); }
+  .btn-danger:hover { background: #FECACA; }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  /* Upload fallback */
+  .divider { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; margin: 10px 0; }
+  .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
+  .upload-fallback {
+    border: 2px dashed var(--border); border-radius: 10px;
+    padding: 16px; text-align: center; cursor: pointer;
+    transition: all 0.2s; position: relative;
+  }
+  .upload-fallback:hover { border-color: var(--green); background: var(--paper); }
+  .upload-fallback input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
+  .upload-fallback p { font-size: 13px; color: var(--muted); }
+
+  /* Invoice list */
+  .list-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 12px; flex-wrap: wrap; gap: 8px;
+  }
+  .list-header h3 { font-size: 15px; font-weight: 700; color: var(--green); }
+  .list-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .invoice-list { display: flex; flex-direction: column; gap: 12px; }
+
+  /* Receipt card */
+  .inv-card {
+    background: var(--white); position: relative;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.09);
+  }
+  .inv-card::before {
+    content: '';
+    display: block; height: 8px;
+    background: radial-gradient(circle at 5px 8px, transparent 5px, white 5px) -5px 0 / 10px 8px repeat-x,
+                var(--green);
+  }
+  .inv-card::after {
+    content: '';
+    display: block; height: 8px;
+    background: radial-gradient(circle at 5px 0, transparent 5px, white 5px) -5px 0 / 10px 8px repeat-x;
+  }
+  .inv-inner { padding: 14px 16px; }
+  .inv-top {
+    display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px;
+  }
+  .inv-icon {
+    width: 42px; height: 42px; border-radius: 8px;
+    background: var(--green); color: white; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center; font-size: 20px;
+  }
+  .inv-meta { flex: 1; min-width: 0; }
+  .inv-num { font-family: 'Courier New', monospace; font-size: 15px; font-weight: 700; color: var(--green); letter-spacing: 1px; }
+  .inv-date { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .inv-amount { font-size: 21px; font-weight: 700; color: var(--accent); margin-top: 3px; }
+  .inv-tax { font-size: 11px; color: var(--muted); font-weight: 400; }
+
+  .tag {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 20px;
+  }
+  .tag-qr   { background: #D1FAE5; color: #065F46; }
+  .tag-ai   { background: #DBEAFE; color: #1E40AF; }
+  .tag-manual { background: #F3F4F6; color: #374151; }
+
+  .inv-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; margin-top: 10px;
+  }
+  .inv-field label { display: block; font-size: 11px; color: var(--muted); font-weight: 600; margin-bottom: 2px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .inv-field input, .inv-field textarea {
+    width: 100%; padding: 7px 10px; border: 1.5px solid var(--border);
+    border-radius: 6px; font-size: 13px; background: var(--paper);
+    font-family: inherit; resize: vertical;
+  }
+  .inv-field input:focus, .inv-field textarea:focus { outline: none; border-color: var(--green); }
+  .inv-field.full { grid-column: 1 / -1; }
+
+  .items-list { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 10px; }
+  .items-list .item-row {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; padding: 3px 0; border-bottom: 1px solid #F3EDD8;
+  }
+  .items-list .item-name { flex: 1; }
+  .items-list .item-qty, .items-list .item-price { color: var(--muted); white-space: nowrap; }
+
+  .inv-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+
+  /* Export */
+  .export-panel {
+    background: var(--green); border-radius: 12px;
+    padding: 16px 18px; color: white; margin-bottom: 18px;
+    display: none;
+  }
+  .export-panel.on { display: block; }
+  .export-panel h3 { font-size: 14px; font-weight: 700; margin-bottom: 10px; }
+  .export-panel textarea {
+    width: 100%; height: 110px; background: rgba(255,255,255,0.12);
+    border: 1.5px solid rgba(255,255,255,0.3); color: white;
+    border-radius: 8px; padding: 10px;
+    font-family: 'Courier New', monospace; font-size: 11px; resize: vertical;
+  }
+  .export-row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .btn-white { background: white; color: var(--green); font-weight: 700; }
+  .btn-white:hover { background: var(--paper); }
+  .btn-ghost-white { background: rgba(255,255,255,0.15); color: white; }
+
+  /* Empty */
+  .empty { text-align: center; padding: 36px 20px; color: var(--muted); }
+  .empty .e-icon { font-size: 44px; margin-bottom: 10px; }
+  .empty p { font-size: 14px; }
+
+  /* Toast */
+  .toast {
+    position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%) translateY(60px);
+    background: var(--ink); color: white; padding: 10px 20px;
+    border-radius: 24px; font-size: 13px; font-weight: 500;
+    z-index: 300; transition: transform 0.3s, opacity 0.3s; opacity: 0; white-space: nowrap;
+  }
+  .toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+
+  /* Modal */
+  .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 200; align-items: center; justify-content: center; padding: 20px; }
+  .modal.open { display: flex; }
+  .modal img { max-width: 100%; max-height: 88vh; border-radius: 8px; }
+  .modal-x { position: absolute; top: 14px; right: 14px; background: white; border: none; border-radius: 50%; width: 34px; height: 34px; font-size: 17px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+
+  @media (max-width: 560px) {
+    .inv-grid { grid-template-columns: 1fr; }
+    .inv-num { font-size: 13px; }
+  }
+</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<header>
+  <div class="logo">發票<em>掃</em></div>
+  <span class="badge" id="badge">0 張</span>
+</header>
+
+<main>
+
+  <!-- Scanner -->
+  <div class="scanner-card">
+    <div class="scanner-header">
+      <span>📷</span>
+      <h2>掃描發票 QR Code</h2>
+    </div>
+    <div class="scanner-body">
+      <div id="videoWrap">
+        <video id="video" playsinline autoplay muted></video>
+        <canvas id="canvas"></canvas>
+        <div class="scan-overlay" id="overlay">
+          <div class="scan-frame"><div class="c1"></div></div>
+          <div class="scan-line"></div>
+        </div>
+        <div class="cam-placeholder" id="placeholder">
+          <div class="icon">📷</div>
+          <div>點擊「開啟相機」開始掃描</div>
+        </div>
+      </div>
+
+      <div class="status-bar" id="statusBar"></div>
+
+      <div class="cam-actions">
+        <button class="btn btn-green" id="btnCam" onclick="toggleCamera()">📷 開啟相機</button>
+        <button class="btn btn-outline" onclick="document.getElementById('fileUpload').click()">🗂 上傳圖片</button>
+        <input type="file" id="fileUpload" accept="image/*" multiple style="display:none" onchange="handleUpload(this.files)">
+      </div>
+
+      <div class="divider">或手動新增</div>
+      <div class="upload-fallback" onclick="addManual()">
+        <p>➕ 手動新增一筆空白發票</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Export -->
+  <div class="export-panel" id="exportPanel">
+    <h3>📋 複製到 Google 試算表</h3>
+    <textarea id="exportText" readonly></textarea>
+    <div class="export-row">
+      <button class="btn btn-white" onclick="copyExport()">📋 複製</button>
+      <button class="btn btn-white" onclick="openSheets()">↗ 開啟試算表</button>
+      <button class="btn btn-ghost-white" onclick="document.getElementById('exportPanel').classList.remove('on')">✕ 關閉</button>
+    </div>
+  </div>
+
+  <!-- List -->
+  <div id="listSection" style="display:none">
+    <div class="list-header">
+      <h3>🧾 發票列表</h3>
+      <div class="list-actions">
+        <button class="btn btn-sm btn-accent" onclick="showExport()">📊 匯出試算表</button>
+        <button class="btn btn-sm btn-danger" onclick="clearAll()">🗑 清除全部</button>
+      </div>
+    </div>
+    <div class="invoice-list" id="invoiceList"></div>
+  </div>
+
+  <div class="empty" id="emptyState">
+    <div class="e-icon">🧾</div>
+    <p>還沒有發票，掃描 QR Code 或上傳圖片開始使用</p>
+  </div>
+
+</main>
+
+<div class="modal" id="imgModal" onclick="closeModal()">
+  <button class="modal-x" onclick="closeModal()">✕</button>
+  <img id="modalImg" src="" alt="">
+</div>
+<div class="toast" id="toast"></div>
+
+<!-- jsQR library -->
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+
+<script>
+let invoices = [];
+let nextId = 1;
+let stream = null;
+let scanning = false;
+let scanLoop = null;
+let leftQR = null;   // buffer for left QR
+let rightQR = null;  // buffer for right QR
+
+// ─── Storage ───────────────────────────────────────────────
+function saveData() {
+  try {
+    // save without imageData if too large
+    const slim = invoices.map(inv => {
+      const { imageData, ...rest } = inv;
+      return rest;
+    });
+    localStorage.setItem('inv_qr_v1', JSON.stringify(slim));
+    // images separately
+    invoices.forEach(inv => {
+      if (inv.imageData) {
+        try { localStorage.setItem('inv_img_' + inv.id, inv.imageData); } catch(e) {}
+      }
+    });
+  } catch(e) {}
+}
+
+function loadData() {
+  try {
+    const s = localStorage.getItem('inv_qr_v1');
+    if (!s) return;
+    invoices = JSON.parse(s);
+    invoices.forEach(inv => {
+      const img = localStorage.getItem('inv_img_' + inv.id);
+      if (img) inv.imageData = img;
+      nextId = Math.max(nextId, inv.id + 1);
+    });
+    invoices.forEach(inv => renderCard(inv));
+    updateUI();
+  } catch(e) { invoices = []; }
+}
+
+// ─── Camera ────────────────────────────────────────────────
+async function toggleCamera() {
+  if (scanning) { stopCamera(); return; }
+  await startCamera();
+}
+
+async function startCamera() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+    });
+    const video = document.getElementById('video');
+    video.srcObject = stream;
+    video.style.display = 'block';
+    document.getElementById('placeholder').style.display = 'none';
+    document.getElementById('overlay').classList.add('active');
+    document.getElementById('btnCam').textContent = '⏹ 停止相機';
+    scanning = true;
+    setStatus('scanning', '對準發票上的 QR Code（左側或右側皆可）');
+    requestAnimationFrame(tick);
+  } catch(e) {
+    setStatus('error', '無法開啟相機：' + e.message);
+  }
+}
+
+function stopCamera() {
+  scanning = false;
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  document.getElementById('video').style.display = 'none';
+  document.getElementById('placeholder').style.display = 'flex';
+  document.getElementById('overlay').classList.remove('active');
+  document.getElementById('btnCam').textContent = '📷 開啟相機';
+  setStatus('', '');
+  leftQR = null; rightQR = null;
+}
+
+function tick() {
+  if (!scanning) return;
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('canvas');
+  if (video.readyState === video.HAVE_ENOUGH_DATA) {
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0);
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const code = jsQR(imgData.data, imgData.width, imgData.height, { inversionAttempts: 'dontInvert' });
+    if (code) {
+      handleQRCode(code.data);
+    }
+  }
+  if (scanning) requestAnimationFrame(tick);
+}
+
+// ─── Upload fallback ───────────────────────────────────────
+function handleUpload(files) {
+  if (!files || files.length === 0) return;
+  Array.from(files).forEach(file => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width; canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = jsQR(imgData.data, imgData.width, imgData.height, { inversionAttempts: 'attemptBoth' });
+        if (code) {
+          handleQRCode(code.data, e.target.result);
+        } else {
+          // Add as manual with image
+          const inv = makeInvoice({ source: 'image' });
+          inv.imageData = e.target.result;
+          inv.filename = file.name;
+          addInvoice(inv);
+          showToast('⚠️ 未偵測到 QR Code，已新增空白發票');
+        }
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+  document.getElementById('fileUpload').value = '';
+}
+
+// ─── QR Parsing ────────────────────────────────────────────
+function handleQRCode(data, imageData) {
+  // Right QR starts with **
+  if (data.startsWith('**')) {
+    rightQR = data.slice(2);
+    setStatus('info', '已掃右側 QR Code，請掃左側 QR Code');
+    tryMerge(imageData);
+    return;
+  }
+
+  // Left QR: doesn't start with **
+  // Quick sanity: left QR first 10 chars = invoice number letters+digits
+  leftQR = data;
+  setStatus('success', '已掃左側 QR Code！');
+  tryMerge(imageData);
+}
+
+function tryMerge(imageData) {
+  if (leftQR) {
+    const inv = parseLeftQR(leftQR, rightQR);
+    if (inv) {
+      inv.imageData = imageData || null;
+      addInvoice(inv);
+      toast_added(inv);
+      // reset buffers
+      leftQR = null; rightQR = null;
+      if (scanning) setStatus('scanning', '繼續掃描下一張發票…');
+    }
+  }
+}
+
+function parseLeftQR(left, right) {
+  try {
+    // Fixed 77-char section
+    if (left.length < 77) return null;
+    const fixed = left.slice(0, 77);
+
+    const numberRaw = fixed.slice(0, 10);   // AB12345678
+    const invNumber = numberRaw.slice(0, 2) + '-' + numberRaw.slice(2);
+
+    const dateRaw = fixed.slice(10, 17);    // 1130520
+    const year  = parseInt(dateRaw.slice(0, 3), 10);
+    const month = dateRaw.slice(3, 5);
+    const day   = dateRaw.slice(5, 7);
+    const invDate = `民國${year}年${parseInt(month,10)}月${parseInt(day,10)}日`;
+
+    const salesHex  = fixed.slice(21, 29);
+    const totalHex  = fixed.slice(29, 37);
+    const salesAmt  = parseInt(salesHex, 16);
+    const totalAmt  = parseInt(totalHex, 16);
+
+    const buyerTax  = fixed.slice(37, 45);
+    const sellerTax = fixed.slice(45, 53);
+
+    // Variable section after 77 chars + right QR
+    const varPart = left.slice(77) + (right || '');
+    const parts = varPart.split(':');
+    // parts[0] = '' (colon prefix), [1]=custom10, [2]=qr_item_count, [3]=total_item_count, [4]=encoding, [5+]=items
+    let items = [];
+    if (parts.length >= 5) {
+      const encoding = parts[4]; // 0=Big5, 1=UTF-8, 2=Base64
+      let idx = 5;
+      while (idx + 2 < parts.length) {
+        const name  = decodeItem(parts[idx], encoding);
+        const qty   = parseInt(parts[idx+1], 10);
+        const price = parseFloat(parts[idx+2]);
+        if (name) items.push({ name, qty, price });
+        idx += 3;
+      }
+    }
+
+    return {
+      id: nextId++,
+      source: 'qr',
+      number: invNumber,
+      date: invDate,
+      dateRaw: `${year}/${month}/${day}`,
+      salesAmount: isNaN(salesAmt) ? '' : salesAmt,
+      totalAmount: isNaN(totalAmt) ? '' : totalAmt,
+      buyerTax: buyerTax === '00000000' ? '' : buyerTax,
+      sellerTax,
+      items,
+      imageData: null,
+      note: ''
+    };
+  } catch(e) {
+    console.error('QR parse error', e);
+    return null;
+  }
+}
+
+function decodeItem(str, encoding) {
+  if (!str) return '';
+  if (encoding === '2') {
+    try { return atob(str); } catch(e) { return str; }
+  }
+  return str;
+}
+
+function makeInvoice(extra) {
+  return {
+    id: nextId++,
+    source: 'manual',
+    number: '', date: '', dateRaw: '',
+    salesAmount: '', totalAmount: '',
+    buyerTax: '', sellerTax: '',
+    items: [], imageData: null, note: '', filename: '',
+    ...extra
+  };
+}
+
+function addManual() {
+  const inv = makeInvoice({});
+  addInvoice(inv);
+  showToast('已新增空白發票');
+}
+
+function addInvoice(inv) {
+  invoices.unshift(inv);
+  saveData();
+  renderCard(inv);
+  updateUI();
+}
+
+function toast_added(inv) {
+  stopCamera();
+  showToast(`✅ 已讀取：${inv.number}　NT$ ${inv.totalAmount.toLocaleString()}`);
+}
+
+// ─── Render ────────────────────────────────────────────────
+function renderCard(inv) {
+  const old = document.getElementById('icard-' + inv.id);
+  if (old) old.remove();
+
+  const tagMap = { qr: ['tag-qr','QR 掃描'], ai: ['tag-ai','AI 辨識'], manual: ['tag-manual','手動'] };
+  const [tagCls, tagLabel] = tagMap[inv.source] || tagMap.manual;
+
+  const itemsHtml = inv.items && inv.items.length > 0
+    ? `<div class="items-list">
+        ${inv.items.map(it =>
+          `<div class="item-row">
+            <span class="item-name">${esc(it.name)}</span>
+            <span class="item-qty">×${it.qty}</span>
+            <span class="item-price">NT$ ${(it.price*it.qty).toLocaleString()}</span>
+          </div>`
+        ).join('')}
+       </div>`
+    : '';
+
+  const thumbHtml = inv.imageData
+    ? `<img src="${inv.imageData}" alt="發票" style="width:44px;height:44px;object-fit:cover;border-radius:8px;border:1.5px solid var(--border);cursor:pointer" onclick="openModal(${inv.id})">`
+    : `<div class="inv-icon">🧾</div>`;
+
+  const card = document.createElement('div');
+  card.className = 'inv-card';
+  card.id = 'icard-' + inv.id;
+  card.innerHTML = `<div class="inv-inner">
+    <div class="inv-top">
+      ${thumbHtml}
+      <div class="inv-meta">
+        <div class="inv-num">${inv.number || '─ ─ ─ ─ ─'}</div>
+        <div class="inv-date">${inv.date || '日期未填'}</div>
+        <div class="inv-amount">NT$ ${inv.totalAmount !== '' ? Number(inv.totalAmount).toLocaleString() : '─'}
+          ${inv.salesAmount !== '' ? `<span class="inv-tax">（未稅 ${Number(inv.salesAmount).toLocaleString()}）</span>` : ''}
+        </div>
+        <span class="tag ${tagCls}">${tagLabel}</span>
+        ${inv.sellerTax ? `<span style="font-size:11px;color:var(--muted);margin-left:6px">賣方：${inv.sellerTax}</span>` : ''}
+      </div>
+    </div>
+    ${itemsHtml}
+    <div class="inv-grid" style="display:${inv.source === 'manual' ? 'grid' : 'none'}" id="grid-${inv.id}">
+      <div class="inv-field">
+        <label>發票號碼</label>
+        <input type="text" value="${inv.number}" placeholder="AB-12345678" onchange="setField(${inv.id},'number',this.value)">
+      </div>
+      <div class="inv-field">
+        <label>日期</label>
+        <input type="text" value="${inv.dateRaw}" placeholder="113/05/20" onchange="setField(${inv.id},'dateRaw',this.value)">
+      </div>
+      <div class="inv-field">
+        <label>含稅總額</label>
+        <input type="text" value="${inv.totalAmount}" placeholder="0" onchange="setField(${inv.id},'totalAmount',this.value)">
+      </div>
+      <div class="inv-field">
+        <label>品項備註</label>
+        <input type="text" value="${inv.note}" placeholder="品項描述" onchange="setField(${inv.id},'note',this.value)">
+      </div>
+    </div>
+    <div class="inv-actions">
+      <button class="btn btn-sm btn-ghost" onclick="toggleEdit(${inv.id})">✏️ 編輯</button>
+      <button class="btn btn-sm btn-danger" onclick="deleteInv(${inv.id})">🗑 刪除</button>
+    </div>
+  </div>`;
+
+  document.getElementById('invoiceList').prepend(card);
+}
+
+function toggleEdit(id) {
+  const grid = document.getElementById('grid-' + id);
+  if (!grid) return;
+  grid.style.display = grid.style.display === 'none' ? 'grid' : 'none';
+}
+
+function setField(id, field, value) {
+  const inv = invoices.find(i => i.id === id);
+  if (inv) { inv[field] = value; saveData(); }
+}
+
+function deleteInv(id) {
+  invoices = invoices.filter(i => i.id !== id);
+  try { localStorage.removeItem('inv_img_' + id); } catch(e) {}
+  document.getElementById('icard-' + id)?.remove();
+  saveData(); updateUI();
+}
+
+function clearAll() {
+  if (!confirm('確定要清除全部發票資料？')) return;
+  invoices.forEach(inv => { try { localStorage.removeItem('inv_img_' + inv.id); } catch(e) {} });
+  invoices = [];
+  document.getElementById('invoiceList').innerHTML = '';
+  saveData(); updateUI();
+}
+
+// ─── Export ────────────────────────────────────────────────
+function showExport() {
+  const header = '發票號碼\t日期\t未稅金額\t含稅總額\t賣方統編\t買方統編\t品項';
+  const rows = invoices.map(inv => {
+    const itemStr = inv.items && inv.items.length
+      ? inv.items.map(it => `${it.name}×${it.qty}`).join('、')
+      : inv.note || '';
+    return [
+      inv.number,
+      inv.dateRaw || inv.date,
+      inv.salesAmount,
+      inv.totalAmount,
+      inv.sellerTax,
+      inv.buyerTax,
+      itemStr
+    ].join('\t');
+  });
+  document.getElementById('exportText').value = [header, ...rows].join('\n');
+  document.getElementById('exportPanel').classList.add('on');
+  document.getElementById('exportPanel').scrollIntoView({ behavior: 'smooth' });
+}
+
+function copyExport() {
+  const text = document.getElementById('exportText').value;
+  navigator.clipboard.writeText(text).then(() => showToast('✅ 已複製！貼到 Google 試算表即可'));
+}
+
+function openSheets() {
+  copyExport();
+  setTimeout(() => window.open('https://sheets.new', '_blank'), 400);
+}
+
+// ─── UI helpers ────────────────────────────────────────────
+function updateUI() {
+  const has = invoices.length > 0;
+  document.getElementById('listSection').style.display = has ? 'block' : 'none';
+  document.getElementById('emptyState').style.display = has ? 'none' : 'block';
+  const b = document.getElementById('badge');
+  b.style.display = has ? 'inline-block' : 'none';
+  b.textContent = invoices.length + ' 張';
+}
+
+function setStatus(type, msg) {
+  const el = document.getElementById('statusBar');
+  el.textContent = msg;
+  el.className = 'status-bar' + (type ? ' ' + type : '');
+}
+
+function openModal(id) {
+  const inv = invoices.find(i => i.id === id);
+  if (!inv?.imageData) return;
+  document.getElementById('modalImg').src = inv.imageData;
+  document.getElementById('imgModal').classList.add('open');
+}
+function closeModal() { document.getElementById('imgModal').classList.remove('open'); }
+
+let toastT;
+function showToast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.classList.add('show');
+  clearTimeout(toastT);
+  toastT = setTimeout(() => el.classList.remove('show'), 3000);
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ─── Init ──────────────────────────────────────────────────
+loadData();
+</script>
+</body>
+</html>
