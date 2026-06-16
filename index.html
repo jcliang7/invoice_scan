@@ -425,7 +425,7 @@ function tick() {
     const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const code = jsQR(imgData.data, imgData.width, imgData.height, { inversionAttempts: 'dontInvert' });
     if (code) {
-      handleQRCode(code.data);
+      handleQRCode(code.data, null, code.binaryData ? new Uint8Array(code.binaryData) : null);
     }
   }
   if (scanning) requestAnimationFrame(tick);
@@ -446,7 +446,7 @@ function handleUpload(files) {
         const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         const code = jsQR(imgData.data, imgData.width, imgData.height, { inversionAttempts: 'attemptBoth' });
         if (code) {
-          handleQRCode(code.data, e.target.result);
+          handleQRCode(code.data, e.target.result, code.binaryData ? new Uint8Array(code.binaryData) : null);
         } else {
           // Add as manual with image
           const inv = makeInvoice({ source: 'image' });
@@ -464,18 +464,17 @@ function handleUpload(files) {
 }
 
 // ─── QR Parsing ────────────────────────────────────────────
-function handleQRCode(data, imageData) {
+// jsQR returns string; for Big5 right QR we also store raw Uint8Array
+function handleQRCode(data, imageData, rawBytes) {
   // Right QR starts with **
   if (data.startsWith('**')) {
-    rightQR = data.slice(2);
+    // Store both decoded string and raw bytes (for Big5)
+    rightQR = { text: data.slice(2), raw: rawBytes || null };
     setStatus('info', '已掃右側 QR Code，請掃左側 QR Code');
     tryMerge(imageData);
     return;
   }
-
-  // Left QR: doesn't start with **
-  // Quick sanity: left QR first 10 chars = invoice number letters+digits
-  leftQR = data;
+  leftQR = { text: data, raw: rawBytes || null };
   setStatus('success', '已掃左側 QR Code！');
   tryMerge(imageData);
 }
@@ -487,49 +486,64 @@ function tryMerge(imageData) {
       inv.imageData = imageData || null;
       addInvoice(inv);
       toast_added(inv);
-      // reset buffers
       leftQR = null; rightQR = null;
       if (scanning) setStatus('scanning', '繼續掃描下一張發票…');
     }
   }
 }
 
-function parseLeftQR(left, right) {
+function parseLeftQR(leftObj, rightObj) {
   try {
-    // Fixed 77-char section
+    const left = leftObj.text;
+    // Fixed section is 77 chars (ASCII-safe fields only)
     if (left.length < 77) return null;
     const fixed = left.slice(0, 77);
 
-    const numberRaw = fixed.slice(0, 10);   // AB12345678
+    // [0:10] 發票字軌號碼
+    const numberRaw = fixed.slice(0, 10);
     const invNumber = numberRaw.slice(0, 2) + '-' + numberRaw.slice(2);
 
-    const dateRaw = fixed.slice(10, 17);    // 1130520
+    // [10:17] 日期 (3碼年 + 2碼月 + 2碼日) — all ASCII digits
+    const dateRaw = fixed.slice(10, 17);
     const year  = parseInt(dateRaw.slice(0, 3), 10);
-    const month = dateRaw.slice(3, 5);
-    const day   = dateRaw.slice(5, 7);
-    const invDate = `民國${year}年${parseInt(month,10)}月${parseInt(day,10)}日`;
+    const month = parseInt(dateRaw.slice(3, 5), 10);
+    const day   = parseInt(dateRaw.slice(5, 7), 10);
+    const invDate = `民國${year}年${month}月${day}日`;
 
-    const salesHex  = fixed.slice(21, 29);
-    const totalHex  = fixed.slice(29, 37);
-    const salesAmt  = parseInt(salesHex, 16);
-    const totalAmt  = parseInt(totalHex, 16);
+    // [17:21] 隨機碼 (ignored)
+    // [21:29] 未稅額 hex, [29:37] 含稅額 hex
+    const salesHex = fixed.slice(21, 29);
+    const totalHex = fixed.slice(29, 37);
+    const salesAmt = parseInt(salesHex, 16);
+    const totalAmt = parseInt(totalHex, 16);
 
+    // [37:45] 買方, [45:53] 賣方, [53:77] 加密驗證(ignored)
     const buyerTax  = fixed.slice(37, 45);
     const sellerTax = fixed.slice(45, 53);
 
-    // Variable section after 77 chars + right QR
-    const varPart = left.slice(77) + (right || '');
-    const parts = varPart.split(':');
-    // parts[0] = '' (colon prefix), [1]=custom10, [2]=qr_item_count, [3]=total_item_count, [4]=encoding, [5+]=items
+    // Variable section — combine left tail + right QR content
+    // Right QR may be Big5 encoded; decode properly
+    const leftTail = left.slice(77);
+    let rightText = '';
+    if (rightObj) {
+      rightText = decodeBig5OrText(rightObj);
+      // Strip leading ** if present
+      if (rightText.startsWith('**')) rightText = rightText.slice(2);
+    }
+    const varFull = leftTail + rightText;
+    const parts = varFull.split(':');
+    // Layout: :custom10 :qrCount :totalCount :encoding :name :qty :price ...
     let items = [];
     if (parts.length >= 5) {
-      const encoding = parts[4]; // 0=Big5, 1=UTF-8, 2=Base64
+      const encoding = parts[4].trim(); // '0'=Big5, '1'=UTF-8, '2'=Base64
       let idx = 5;
-      while (idx + 2 < parts.length) {
-        const name  = decodeItem(parts[idx], encoding);
-        const qty   = parseInt(parts[idx+1], 10);
-        const price = parseFloat(parts[idx+2]);
-        if (name) items.push({ name, qty, price });
+      while (idx + 2 <= parts.length) {
+        const rawName = parts[idx].trim();
+        const qty     = parseInt(parts[idx + 1], 10);
+        const price   = parseFloat(parts[idx + 2]);
+        if (rawName && !isNaN(qty) && !isNaN(price)) {
+          items.push({ name: rawName, qty, price });
+        }
         idx += 3;
       }
     }
@@ -539,11 +553,11 @@ function parseLeftQR(left, right) {
       source: 'qr',
       number: invNumber,
       date: invDate,
-      dateRaw: `${year}/${month}/${day}`,
+      dateRaw: `${year}/${String(month).padStart(2,'0')}/${String(day).padStart(2,'0')}`,
       salesAmount: isNaN(salesAmt) ? '' : salesAmt,
       totalAmount: isNaN(totalAmt) ? '' : totalAmt,
-      buyerTax: buyerTax === '00000000' ? '' : buyerTax,
-      sellerTax,
+      buyerTax:  buyerTax  === '00000000' ? '' : buyerTax,
+      sellerTax: sellerTax === '00000000' ? '' : sellerTax,
       items,
       imageData: null,
       note: ''
@@ -554,12 +568,16 @@ function parseLeftQR(left, right) {
   }
 }
 
-function decodeItem(str, encoding) {
-  if (!str) return '';
-  if (encoding === '2') {
-    try { return atob(str); } catch(e) { return str; }
+// Try to decode raw bytes as Big5 first (browser TextDecoder),
+// fall back to the already-decoded UTF-8 string from jsQR
+function decodeBig5OrText(qrObj) {
+  if (qrObj.raw) {
+    try {
+      const dec = new TextDecoder('big5');
+      return dec.decode(qrObj.raw);
+    } catch(e) {}
   }
-  return str;
+  return qrObj.text || '';
 }
 
 function makeInvoice(extra) {
@@ -633,27 +651,39 @@ function renderCard(inv) {
       </div>
     </div>
     ${itemsHtml}
-    <div class="inv-grid" style="display:${inv.source === 'manual' ? 'grid' : 'none'}" id="grid-${inv.id}">
+    <div class="inv-grid" style="display:none" id="grid-${inv.id}">
       <div class="inv-field">
         <label>發票號碼</label>
-        <input type="text" value="${inv.number}" placeholder="AB-12345678" onchange="setField(${inv.id},'number',this.value)">
+        <input type="text" id="f-number-${inv.id}" value="${inv.number}" placeholder="AB-12345678">
       </div>
       <div class="inv-field">
-        <label>日期</label>
-        <input type="text" value="${inv.dateRaw}" placeholder="113/05/20" onchange="setField(${inv.id},'dateRaw',this.value)">
+        <label>日期（民國年/月/日）</label>
+        <input type="text" id="f-date-${inv.id}" value="${inv.dateRaw}" placeholder="115/01/03">
       </div>
       <div class="inv-field">
         <label>含稅總額</label>
-        <input type="text" value="${inv.totalAmount}" placeholder="0" onchange="setField(${inv.id},'totalAmount',this.value)">
+        <input type="text" id="f-total-${inv.id}" value="${inv.totalAmount}" placeholder="0">
+      </div>
+      <div class="inv-field">
+        <label>未稅金額</label>
+        <input type="text" id="f-sales-${inv.id}" value="${inv.salesAmount}" placeholder="0">
+      </div>
+      <div class="inv-field">
+        <label>賣方統編</label>
+        <input type="text" id="f-seller-${inv.id}" value="${inv.sellerTax}" placeholder="12345678">
       </div>
       <div class="inv-field">
         <label>品項備註</label>
-        <input type="text" value="${inv.note}" placeholder="品項描述" onchange="setField(${inv.id},'note',this.value)">
+        <input type="text" id="f-note-${inv.id}" value="${inv.note}" placeholder="品項描述">
+      </div>
+      <div class="inv-field full" style="display:flex;gap:8px;margin-top:4px">
+        <button class="btn btn-sm btn-green" onclick="saveEdit(${inv.id})">&#128190; 儲存</button>
+        <button class="btn btn-sm btn-ghost" onclick="toggleEdit(${inv.id})">取消</button>
       </div>
     </div>
     <div class="inv-actions">
-      <button class="btn btn-sm btn-ghost" onclick="toggleEdit(${inv.id})">✏️ 編輯</button>
-      <button class="btn btn-sm btn-danger" onclick="deleteInv(${inv.id})">🗑 刪除</button>
+      <button class="btn btn-sm btn-ghost" id="editbtn-${inv.id}" onclick="toggleEdit(${inv.id})">&#9999;&#65039; 編輯</button>
+      <button class="btn btn-sm btn-danger" onclick="deleteInv(${inv.id})">&#128465; 刪除</button>
     </div>
   </div>`;
 
@@ -662,14 +692,32 @@ function renderCard(inv) {
 
 function toggleEdit(id) {
   const grid = document.getElementById('grid-' + id);
+  const btn  = document.getElementById('editbtn-' + id);
   if (!grid) return;
-  grid.style.display = grid.style.display === 'none' ? 'grid' : 'none';
+  const opening = grid.style.display === 'none';
+  grid.style.display = opening ? 'grid' : 'none';
+  if (btn) btn.textContent = opening ? '✕ 收起' : '✏️ 編輯';
 }
 
-function setField(id, field, value) {
+function saveEdit(id) {
   const inv = invoices.find(i => i.id === id);
-  if (inv) { inv[field] = value; saveData(); }
+  if (!inv) return;
+  const g = (sid) => { const el = document.getElementById(sid); return el ? el.value.trim() : ''; };
+  inv.number      = g('f-number-' + id);
+  inv.dateRaw     = g('f-date-'   + id);
+  inv.totalAmount = g('f-total-'  + id);
+  inv.salesAmount = g('f-sales-'  + id);
+  inv.sellerTax   = g('f-seller-' + id);
+  inv.note        = g('f-note-'   + id);
+  const dp = inv.dateRaw.split('/');
+  if (dp.length === 3) {
+    inv.date = `民國${parseInt(dp[0])}年${parseInt(dp[1])}月${parseInt(dp[2])}日`;
+  }
+  saveData();
+  renderCard(inv);
+  showToast('✅ 已儲存');
 }
+
 
 function deleteInv(id) {
   invoices = invoices.filter(i => i.id !== id);
